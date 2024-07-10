@@ -54,12 +54,8 @@ return {
 
             -- Process each line of data
             rainPrediction = {}
-            rainExpected = false
             for _, line in ipairs(lines) do
                 local rainIntensity, time = line:match("^(%d+)%|(.+)$")
-                if rainIntensity and rainIntensity ~= "000" then
-                    rainExpected = true
-                end
                 table.insert(rainPrediction, { time = time, intensity = rainIntensity })
             end
 
@@ -73,7 +69,7 @@ return {
                         local currentMinute = tonumber(os.date("%M"))
                         local predictionTime = tonumber(hour) * 60 + tonumber(minute)
                         local currentTime = currentHour * 60 + currentMinute
-                        if (predictionTime > currentTime) and (predictionTime <= currentTime + 10) then
+                        if (predictionTime > currentTime + 5) and (predictionTime <= currentTime + 10) then
                             table.insert(alertPredictions, prediction)
                         end
                     end
@@ -81,9 +77,16 @@ return {
             end
 
             -- Find the alert time if rain is expected within 5 to 10 minutes
+            rainExpected = false
             if #alertPredictions > 0 then
-                local alertHour, alertMinute = alertPredictions[1].time:match("(%d+):(%d+)")
-                alertTime = string.format("%02d:%02d", tonumber(alertHour), tonumber(alertMinute))
+                for _, prediction in ipairs(alertPredictions) do
+                    if tonumber(prediction.intensity) > 0 then
+                        local alertHour, alertMinute = prediction.time:match("(%d+):(%d+)")
+                        alertTime = string.format("%02d:%02d", tonumber(alertHour), tonumber(alertMinute))
+                        rainExpected = true
+                        break
+                    end
+                end
             else
                 alertTime = "unknown"
             end
@@ -93,7 +96,7 @@ return {
 
             -- Prepare the message for the virtual text device
             local updateMessage = ""
-            if #alertPredictions > 0 then
+            if rainExpected then
                 updateMessage = 'Rain expected in the next 5 to 10 minutes until ' .. alertTime .. '. Checked at: ' .. checkEndTime .. '.'
                 domoticz.log("Rain expected in the next 5 to 10 minutes until " .. alertTime .. ". Checked at: " .. checkEndTime .. ".", domoticz.LOG_INFO)
                 -- Add the update command to the command array for the virtual text device
@@ -131,5 +134,71 @@ return {
 
         -- Fetch the data immediately
         fetchData()
+        
+        -- Set the IDX of the wind device
+        local Wind_IDX = 15
+
+        -- Set the maximum wind speed threshold (in m/s)
+        local Max_Wind_Speed = 5.4
+
+        -- Get the wind device
+        local windDevice = domoticz.devices(Wind_IDX)
+
+        if windDevice then
+            domoticz.log("Wind device found: " .. windDevice.name, domoticz.LOG_INFO)
+            local windData = windDevice.state
+            if windData then
+                domoticz.log("Wind data: " .. windData, domoticz.LOG_INFO)
+                local values = {}
+                for value in string.gmatch(windData, "([^;]+)") do
+                    table.insert(values, value)
+                end
+                domoticz.log("Values table:", domoticz.LOG_INFO)
+                for i, value in ipairs(values) do
+                    domoticz.log("  [" .. i .. "]: " .. value, domoticz.LOG_INFO)
+                end
+                -- Now you can access the individual values
+                local windBearing = tonumber(values[1])
+                local windDirection = values[2]
+                local windSpeed = tonumber(values[3]) / 10
+                local windGustSpeed = tonumber(values[4]) / 10
+                domoticz.log("Wind bearing: " .. tostring(windBearing), domoticz.LOG_INFO)
+                domoticz.log("Wind direction: " .. windDirection, domoticz.LOG_INFO)
+                domoticz.log("Wind speed: " .. tostring(windSpeed), domoticz.LOG_INFO)
+                domoticz.log("Wind gust speed: " .. tostring(windGustSpeed), domoticz.LOG_INFO)
+
+                -- Check if wind speed is above the maximum threshold
+                if windSpeed > Max_Wind_Speed then
+                    domoticz.log("Closing sunscreen due to high wind speed: " .. tostring(windSpeed), domoticz.LOG_WARNING)
+                    -- Switch off or dim all sunscreen devices
+                    for _, idx in ipairs(Sunscreen_IDXS) do
+                        local sunscreen = domoticz.devices(idx)
+                        if sunscreen then
+                            if sunscreen.deviceType == domoticz.DEVICE_TYPE_DIMMER then
+                                if sunscreen.percentage > 0 then
+                                    sunscreen.dimTo(0)
+                                    domoticz.log('Sunscreen (dimmer) going to 0%', domoticz.LOG_INFO)
+                                else
+                                    domoticz.log('Sunscreen (dimmer) already at 0%', domoticz.LOG_INFO)
+                                end
+                            else
+                                if sunscreen.state ~= 'Off' then
+                                    sunscreen.switchOff()
+                                    domoticz.log('Sunscreen (switch) going off', domoticz.LOG_INFO)
+                                else
+                                    domoticz.log('Sunscreen (switch) already off', domoticz.LOG_INFO)
+                                end
+                            end
+                        else
+                            domoticz.log('Error: Sunscreen device with IDX ' .. idx .. ' not found', domoticz.LOG_ERROR)
+                        end
+                    end
+                end
+            else
+                domoticz.log("Error: No data available for wind device with IDX " .. Wind_IDX, domoticz.LOG_ERROR)
+            end
+        else
+            domoticz.log("Error: Wind device with IDX " .. Wind_IDX .. " not found", domoticz.LOG_ERROR)
+        end
     end
 }
