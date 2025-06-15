@@ -1,3 +1,22 @@
+-- Set the IDX of the virtual text device
+local RainText_IDX = 51
+local WindText_IDX = 49
+
+-- Set the list of IDXs for the sunscreen devices (as percentages or switches)
+local Sunscreen_IDXS = { 52, 36 } -- Add more IDXs as needed for example { 52, 53, 54 }
+
+-- Set the IDX of the wind device
+local Wind_IDX = 15
+
+-- Set the maximum wind speed threshold (in m/s)
+local Max_Wind_Speed = 6.5
+
+-- Set the latitude and longitude and round it to 2 decimal
+local function round(num, numDecimalPlaces)
+    local mult = 10^(numDecimalPlaces or 0)
+    return math.floor(num * mult + 0.5) / mult
+end
+
 return {
     active = true, -- optional
     on = {
@@ -8,19 +27,6 @@ return {
         marker = "Rain and Sunscreen"
     },
     execute = function(domoticz, item)
-
-        -- Set the IDX of the virtual text device
-        local RainText_IDX = 51
-
-        -- Set the list of IDXs for the sunscreen devices (as percentages or switches)
-        local Sunscreen_IDXS = { 52 } -- Add more IDXs as needed for example { 52, 53, 54 }
-
-        -- Set the latitude and longitude and round it to 2 decimal
-        function round(num, numDecimalPlaces)
-            local mult = 10^(numDecimalPlaces or 0)
-            return math.floor(num * mult + 0.5) / mult
-        end
-
         local lat = round(domoticz.settings.location.latitude, 2)
         local lon = round(domoticz.settings.location.longitude, 2)
 
@@ -97,11 +103,105 @@ return {
             -- Prepare the message for the virtual text device
             local updateMessage = ""
             if rainExpected then
-                updateMessage = 'Rain expected in the next 5 to 10 minutes until ' .. alertTime .. '. Checked at: ' .. checkEndTime .. '.'
+                updateMessage = 'Rain expected in the next 5 to 10 minutes until ' .. alertTime
                 domoticz.log("Rain expected in the next 5 to 10 minutes until " .. alertTime .. ". Checked at: " .. checkEndTime .. ".", domoticz.LOG_INFO)
-                -- Add the update command to the command array for the virtual text device
+            else
+                updateMessage = 'No rain expected in the next 5 to 10 minutes'
+                domoticz.log("No rain expected in the next 5 to 10 minutes. Checked at: " .. checkEndTime .. ".", domoticz.LOG_INFO)
+            end
+
+            -- Update the virtual text device only if the message has changed
+            local currentMessage = domoticz.devices(RainText_IDX).text
+            if currentMessage ~= updateMessage then
                 domoticz.devices(RainText_IDX).updateText(updateMessage)
-                -- Check the type of each sunscreen device and set to 0% or off
+            end
+        end
+
+        -- Fetch the data immediately
+        fetchData()
+
+        -- Initialize wind speed variable
+        local windSpeed = 0
+
+        -- Get the wind device
+        local windDevice = domoticz.devices(Wind_IDX)
+        if windDevice then
+            domoticz.log("Wind device found: " .. windDevice.name, domoticz.LOG_INFO)
+            local windData = windDevice.state
+            if windData then
+                domoticz.log("Wind data: " .. windData, domoticz.LOG_INFO)
+                local values = {}
+                for value in string.gmatch(windData, "([^;]+)") do
+                    table.insert(values, value)
+                end
+                domoticz.log("Values table:", domoticz.LOG_INFO)
+                for i, value in ipairs(values) do
+                    domoticz.log("  [" .. i .. "]: " .. value, domoticz.LOG_INFO)
+                end
+                -- Now you can access the individual values
+                local windBearing = tonumber(values[1])
+                local windDirection = values[2]
+                windSpeed = tonumber(values[3]) / 10
+                local windGustSpeed = tonumber(values[4]) / 10
+                domoticz.log("Wind bearing: " .. tostring(windBearing), domoticz.LOG_INFO)
+                domoticz.log("Wind direction: " .. windDirection, domoticz.LOG_INFO)
+                domoticz.log("Wind speed: " .. tostring(windSpeed), domoticz.LOG_INFO)
+                domoticz.log("Wind gust speed: " .. tostring(windGustSpeed), domoticz.LOG_INFO)
+                
+                                -- Prepare the message for the virtual text device
+                local updateMessage = ""
+                if windSpeed > Max_Wind_Speed then
+                    updateMessage = 'Het waait wel heel erg hard buiten ' .. alertTime
+                else
+                    updateMessage = 'Lekker briesje buiten'
+                end
+    
+                -- Update the virtual text device only if the message has changed
+                local currentMessage = domoticz.devices(WindText_IDX).text
+                if currentMessage ~= updateMessage then
+                    domoticz.devices(WindText_IDX).updateText(updateMessage)
+                end
+                
+            else
+                domoticz.log("Error: No data available for wind device with IDX " .. Wind_IDX, domoticz.LOG_ERROR)
+            end
+        else
+            domoticz.log("Error: Wind device with IDX " .. Wind_IDX .. " not found", domoticz.LOG_ERROR)
+        end
+
+        -- Check if rain is expected or wind speed is above the maximum threshold
+        if rainExpected or windSpeed > Max_Wind_Speed then
+            local anyOpen = false
+
+            for _, idx in ipairs(Sunscreen_IDXS) do
+                local sunscreen = domoticz.devices(idx)
+                if sunscreen then
+                    if sunscreen.deviceType == domoticz.DEVICE_TYPE_DIMMER then
+                        if sunscreen.percentage > 0 then
+                            anyOpen = true
+                            break
+                        end
+                    else
+                        if sunscreen.state ~= 'Off' then
+                            anyOpen = true
+                            break
+                        end
+                    end
+                end
+            end
+
+            -- Only act if at least one sunscreen is open
+            if anyOpen then
+                local reason = (rainExpected and "expected rain" or "") ..
+                               (rainExpected and windSpeed > Max_Wind_Speed and " and " or "") ..
+                               (windSpeed > Max_Wind_Speed and "high wind speed" or "")
+
+                local message = "Zonnescherm sluit vanwege " .. reason .. "."
+
+                domoticz.log(message, domoticz.LOG_WARNING)
+                domoticz.notify("Sunscreen Closing", message, domoticz.PRIORITY_NORMAL)
+
+                -- Switch off or dim all sunscreen devices
                 for _, idx in ipairs(Sunscreen_IDXS) do
                     local sunscreen = domoticz.devices(idx)
                     if sunscreen then
@@ -125,80 +225,8 @@ return {
                     end
                 end
             else
-                updateMessage = 'No rain expected in the next 5 to 10 minutes. Checked at: ' .. checkEndTime .. '.'
-                domoticz.log("No rain expected in the next 5 to 10 minutes. Checked at: " .. checkEndTime .. ".", domoticz.LOG_INFO)
-                -- Add the update command to the command array for the virtual text device
-                domoticz.devices(RainText_IDX).updateText(updateMessage)
+                domoticz.log("Weather warning present, but all sunscreens already closed — no action taken.", domoticz.LOG_DEBUG)
             end
-        end
-
-        -- Fetch the data immediately
-        fetchData()
-        
-        -- Set the IDX of the wind device
-        local Wind_IDX = 15
-
-        -- Set the maximum wind speed threshold (in m/s)
-        local Max_Wind_Speed = 5.4
-
-        -- Get the wind device
-        local windDevice = domoticz.devices(Wind_IDX)
-
-        if windDevice then
-            domoticz.log("Wind device found: " .. windDevice.name, domoticz.LOG_INFO)
-            local windData = windDevice.state
-            if windData then
-                domoticz.log("Wind data: " .. windData, domoticz.LOG_INFO)
-                local values = {}
-                for value in string.gmatch(windData, "([^;]+)") do
-                    table.insert(values, value)
-                end
-                domoticz.log("Values table:", domoticz.LOG_INFO)
-                for i, value in ipairs(values) do
-                    domoticz.log("  [" .. i .. "]: " .. value, domoticz.LOG_INFO)
-                end
-                -- Now you can access the individual values
-                local windBearing = tonumber(values[1])
-                local windDirection = values[2]
-                local windSpeed = tonumber(values[3]) / 10
-                local windGustSpeed = tonumber(values[4]) / 10
-                domoticz.log("Wind bearing: " .. tostring(windBearing), domoticz.LOG_INFO)
-                domoticz.log("Wind direction: " .. windDirection, domoticz.LOG_INFO)
-                domoticz.log("Wind speed: " .. tostring(windSpeed), domoticz.LOG_INFO)
-                domoticz.log("Wind gust speed: " .. tostring(windGustSpeed), domoticz.LOG_INFO)
-
-                -- Check if wind speed is above the maximum threshold
-                if windSpeed > Max_Wind_Speed then
-                    domoticz.log("Closing sunscreen due to high wind speed: " .. tostring(windSpeed), domoticz.LOG_WARNING)
-                    -- Switch off or dim all sunscreen devices
-                    for _, idx in ipairs(Sunscreen_IDXS) do
-                        local sunscreen = domoticz.devices(idx)
-                        if sunscreen then
-                            if sunscreen.deviceType == domoticz.DEVICE_TYPE_DIMMER then
-                                if sunscreen.percentage > 0 then
-                                    sunscreen.dimTo(0)
-                                    domoticz.log('Sunscreen (dimmer) going to 0%', domoticz.LOG_INFO)
-                                else
-                                    domoticz.log('Sunscreen (dimmer) already at 0%', domoticz.LOG_INFO)
-                                end
-                            else
-                                if sunscreen.state ~= 'Off' then
-                                    sunscreen.switchOff()
-                                    domoticz.log('Sunscreen (switch) going off', domoticz.LOG_INFO)
-                                else
-                                    domoticz.log('Sunscreen (switch) already off', domoticz.LOG_INFO)
-                                end
-                            end
-                        else
-                            domoticz.log('Error: Sunscreen device with IDX ' .. idx .. ' not found', domoticz.LOG_ERROR)
-                        end
-                    end
-                end
-            else
-                domoticz.log("Error: No data available for wind device with IDX " .. Wind_IDX, domoticz.LOG_ERROR)
-            end
-        else
-            domoticz.log("Error: Wind device with IDX " .. Wind_IDX .. " not found", domoticz.LOG_ERROR)
         end
     end
 }
